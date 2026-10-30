@@ -1,5 +1,7 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
-import { api } from './api.js';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { api, apiRequest } from './api.js';
+import { LinkedListQueue } from './structures/LinkedListQueue.js';
+import { LinkedListStack } from './structures/LinkedListStack.js';
 
 const navigation = [
   { label: 'Dashboard', icon: '◫', section: 'main' },
@@ -9,6 +11,7 @@ const navigation = [
   { label: 'Menu', icon: '◉', section: 'manage' },
   { label: 'Staff', icon: '♧', section: 'manage' },
   { label: 'Orders', icon: '▣', section: 'manage' },
+  { label: 'Kitchen Queue', icon: '⇥', section: 'manage' },
   { label: 'Payments', icon: '＄', section: 'insights' },
   { label: 'Reports', icon: '▥', section: 'insights' },
 ];
@@ -21,6 +24,7 @@ const titles = {
   Menu: ['Menu', 'Manage the dishes and prices your guests love.'],
   Staff: ['Staff', 'Your team, all in one place.'],
   Orders: ['Orders', 'Follow each order from the table to the kitchen.'],
+  'Kitchen Queue': ['Kitchen Queue', 'Work through newly placed orders in the order they arrived.'],
   Payments: ['Billing & payments', 'Review bills and keep payment records in step.'],
   Reports: ['Reports', 'A clearer view of how the restaurant is doing.'],
 };
@@ -42,6 +46,12 @@ function formatDate(value) {
 
 function initials(name = '') {
   return name.trim().split(/\s+/).slice(0, 2).map((part) => part[0]?.toUpperCase()).join('') || '?';
+}
+
+let orderDraftItemSequence = 0;
+function createOrderDraftItem() {
+  orderDraftItemSequence += 1;
+  return { draft_key: orderDraftItemSequence, menu_item_id: '', quantity: '1' };
 }
 
 function App() {
@@ -153,6 +163,7 @@ function App() {
             {activePage === 'Menu' && <MenuPage notify={notify} />}
             {activePage === 'Staff' && <StaffPage notify={notify} />}
             {activePage === 'Orders' && <OrdersPage notify={notify} quickAction={quickAction?.page === 'Orders' ? quickAction.action : ''} onQuickActionHandled={() => setQuickAction(null)} />}
+            {activePage === 'Kitchen Queue' && <KitchenQueuePage notify={notify} />}
             {activePage === 'Payments' && <PaymentsPage notify={notify} />}
             {activePage === 'Reports' && <ReportsPage />}
           </div>
@@ -499,17 +510,259 @@ function OrdersPage({ notify, quickAction, onQuickActionHandled }) {
     }
   }, [quickAction, onQuickActionHandled]);
   const filtered = orders.filter((order) => (statusFilter === 'all' || order.status === statusFilter) && `${order.order_id} ${order.customer_name} ${order.table_number}`.toLowerCase().includes(search.trim().toLowerCase()));
-  async function createOrder(values) { setSaving(true); try { const result = await api.post('/api/orders', values); notify(`Order #${result.order_id} created. Prices were taken from the menu.`); setCreating(false); await load(); } catch (err) { notify(err.message, 'error'); } finally { setSaving(false); } }
+  async function createOrder(values) { setSaving(true); try { const result = await api.post('/api/orders', values); notify(`Order #${result.order_id} created. Prices were taken from the menu.`); setCreating(false); await load(); return true; } catch (err) { notify(err.message, 'error'); return false; } finally { setSaving(false); } }
   async function updateStatus(order, status) { try { const result = await api.put(`/api/orders/${order.order_id}`, { status }); notify(result.message || `Order #${order.order_id} updated.`); await load(); } catch (err) { notify(err.message, 'error'); } }
   async function viewOrder(order) { setDetail({ loading: true }); try { setDetail(await api.get(`/api/orders/${order.order_id}`)); } catch (err) { setDetail(null); notify(err.message, 'error'); } }
   return <div className="section-content"><section className="panel list-panel"><div className="list-toolbar"><div><span className="section-kicker">SERVICE FLOW</span><h2>Orders <span className="count-badge">{loading ? '…' : orders.length}</span></h2><p className="panel-description">Items and subtotals come directly from the order API.</p></div><button className="primary-button" onClick={() => setCreating(true)}><span>＋</span> New order</button></div><div className="table-tools"><label className="search-box"><span>⌕</span><input aria-label="Search orders" placeholder="Search order, guest or table" value={search} onChange={(e) => setSearch(e.target.value)} /></label><label className="select-wrap"><span className="sr-only">Filter order status</span><select value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)}><option value="all">All statuses</option>{['placed', 'preparing', 'served', 'completed', 'cancelled'].map((status) => <option key={status}>{status}</option>)}</select></label><button className="filter-button" onClick={load}>↻ Refresh</button></div>{lookupError && !error && <div className="inline-error">Some order selections could not load: {lookupError}</div>}{error && <ErrorState message={error} onRetry={load} />}{!error && loading && <LoadingRows />}{!error && !loading && filtered.length === 0 && <EmptyState icon="▣" title={orders.length ? 'No orders match' : 'No orders yet'} description={orders.length ? 'Try another search or status.' : 'Create an order to start tracking service.'} action={!orders.length && <button className="secondary-button" onClick={() => setCreating(true)}>Create order</button>} />}{!error && !loading && filtered.length > 0 && <div className="responsive-table"><table><thead><tr><th>ORDER</th><th>GUEST / TABLE</th><th>STAFF</th><th>SUBTOTAL</th><th>STATUS</th><th /></tr></thead><tbody>{filtered.map((order) => <tr key={order.order_id}><td><div className="contact-cell"><strong>#{order.order_id}</strong><small>{formatDate(order.created_at?.slice(0, 10))}</small></div></td><td><div className="contact-cell"><span>{order.customer_name}</span><small>Table {order.table_number}</small></div></td><td>{order.staff_name || <span className="muted">Unassigned</span>}</td><td className="money-cell">{formatMoney(order.bill_subtotal)}</td><td><select className="status-select" aria-label={`Update order ${order.order_id} status`} value={order.status} onChange={(e) => updateStatus(order, e.target.value)}>{['placed', 'preparing', 'served', 'completed', 'cancelled'].map((status) => <option key={status}>{status}</option>)}</select></td><td><button className="row-action" onClick={() => viewOrder(order)}>Details</button></td></tr>)}</tbody></table></div>}</section>{creating && <OrderModal customers={customers} tables={tables} staff={staff} menu={menu.filter((item) => item.is_available)} lookupError={lookupError} saving={saving} onClose={() => setCreating(false)} onSave={createOrder} />}{detail && <OrderDetailModal detail={detail} onClose={() => setDetail(null)} />}</div>;
 }
 
+function KitchenQueuePage({ notify }) {
+  const queueRef = useRef(new LinkedListQueue());
+  const loadSequenceRef = useRef(0);
+  const processingRef = useRef(false);
+  const [queuedOrders, setQueuedOrders] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [hasLoaded, setHasLoaded] = useState(false);
+  const [processing, setProcessing] = useState(false);
+  const [error, setError] = useState('');
+  const [itemsWarning, setItemsWarning] = useState('');
+  const [lastOperation, setLastOperation] = useState('Queue is waiting for its first refresh.');
+  const [processedCount, setProcessedCount] = useState(0);
+
+  const loadQueue = useCallback(async () => {
+    const loadSequence = ++loadSequenceRef.current;
+    setLoading(true);
+    setError('');
+    try {
+      const orders = await apiRequest('/api/orders');
+      if (!Array.isArray(orders)) throw new Error('The orders response was not in the expected format.');
+      const placed = orders
+        .filter((order) => order.status === 'placed')
+        .sort((a, b) => {
+          const timeDifference = Date.parse(a.created_at) - Date.parse(b.created_at);
+          if (Number.isFinite(timeDifference) && timeDifference !== 0) return timeDifference;
+          const firstId = BigInt(a.order_id);
+          const secondId = BigInt(b.order_id);
+          return firstId < secondId ? -1 : firstId > secondId ? 1 : 0;
+        });
+
+      const detailResults = await Promise.allSettled(
+        placed.map((order) => apiRequest(`/api/orders/${order.order_id}`))
+      );
+      const nextQueue = new LinkedListQueue();
+      let missingItemDetails = 0;
+      let ordersNoLongerPlaced = 0;
+      placed.forEach((order, index) => {
+        const result = detailResults[index];
+        if (result.status === 'fulfilled' && result.value.status !== 'placed') {
+          ordersNoLongerPlaced += 1;
+          return;
+        }
+        const details = result.status === 'fulfilled' ? result.value : null;
+        if (!Array.isArray(details?.items)) missingItemDetails += 1;
+        nextQueue.enqueue({ ...order, items: Array.isArray(details?.items) ? details.items : null });
+      });
+
+      if (loadSequence !== loadSequenceRef.current) return;
+      queueRef.current = nextQueue;
+      setQueuedOrders(nextQueue.toArray());
+      setItemsWarning(missingItemDetails ? `Line-item details could not be loaded for ${missingItemDetails} order${missingItemDetails === 1 ? '' : 's'}. The orders remain queued.` : '');
+      setLastOperation(`Refresh enqueued ${nextQueue.size()} placed order${nextQueue.size() === 1 ? '' : 's'} from PostgreSQL${ordersNoLongerPlaced ? `; skipped ${ordersNoLongerPlaced} order${ordersNoLongerPlaced === 1 ? '' : 's'} that had already advanced` : ''}.`);
+      setHasLoaded(true);
+    } catch (err) {
+      if (loadSequence === loadSequenceRef.current) setError(err.message);
+    } finally {
+      if (loadSequence === loadSequenceRef.current) setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => { loadQueue(); }, [loadQueue]);
+
+  async function startPreparing() {
+    const oldest = queueRef.current.peek();
+    if (!oldest || processingRef.current) return;
+    processingRef.current = true;
+    setProcessing(true);
+    setError('');
+    try {
+      const currentOrder = await apiRequest(`/api/orders/${oldest.order_id}`);
+      if (currentOrder.status !== 'placed') {
+        await loadQueue();
+        throw new Error(`Order #${oldest.order_id} has already advanced. The queue was refreshed from the server.`);
+      }
+
+      const response = await api.put(`/api/orders/${oldest.order_id}`, { status: 'preparing' });
+      if (response?.order?.status !== 'preparing') {
+        throw new Error('The server did not confirm that the order entered preparing status. It remains in the queue.');
+      }
+
+      const removed = queueRef.current.dequeue();
+      setQueuedOrders(queueRef.current.toArray());
+      setProcessedCount((count) => count + 1);
+      setLastOperation(`Dequeue removed order #${removed.order_id} after the API confirmed “preparing”.`);
+      notify(`Order #${removed.order_id} started preparing.`);
+    } catch (err) {
+      setError(err.message);
+      notify(err.message, 'error');
+    } finally {
+      processingRef.current = false;
+      setProcessing(false);
+    }
+  }
+
+  const frontOrder = queueRef.current.peek();
+  const rearOrder = queueRef.current.rear?.value || null;
+
+  return <div className="section-content kitchen-queue-page">
+    <div className="kitchen-queue-toolbar">
+      <div><span className="section-kicker">LIVE ORDER DESK</span><p>Placed orders are lined up by creation time. Refresh reads the current queue from the order API.</p></div>
+      <button className="secondary-button" onClick={loadQueue} disabled={loading || processing}><span>↻</span> {loading ? 'Refreshing…' : 'Refresh queue'}</button>
+    </div>
+    {error && !hasLoaded && <ErrorState message={error} onRetry={loadQueue} />}
+    {error && hasLoaded && <div className="queue-error" role="alert">{error}</div>}
+    {itemsWarning && <div className="queue-note" role="status">{itemsWarning}</div>}
+    <div className="kitchen-queue-grid">
+      <section className="panel kitchen-orders-panel">
+        <div className="kitchen-panel-heading"><div><span className="section-kicker">FIFO · FIRST IN, FIRST OUT</span><h2>Waiting for the kitchen <span className="count-badge">{loading && !hasLoaded ? '…' : queuedOrders.length}</span></h2></div><span className="queue-status"><i /> {queuedOrders.length ? 'Orders waiting' : 'Queue clear'}</span></div>
+        {loading && !hasLoaded ? <LoadingRows /> : queuedOrders.length === 0 ? <EmptyState icon="⇥" title="Nothing waiting" description="Newly placed orders will appear here in the order they were received." /> : <div className="kitchen-order-list">{queuedOrders.map((order, index) => <article className={`kitchen-order-card ${index === 0 ? 'kitchen-order-next' : ''}`} key={order.order_id}>
+          <div className="kitchen-order-heading"><span className="kitchen-order-id">Order #{order.order_id}</span>{index === 0 ? <span className="next-up-pill">NEXT UP</span> : <span className="queue-position">Queue · {index + 1}</span>}</div>
+          <div className="kitchen-order-meta"><strong>{order.customer_name}</strong><span>Table {order.table_number}</span><span className="received-time">Received {new Intl.DateTimeFormat('en-IN', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }).format(new Date(order.created_at))}</span></div>
+          {order.items?.length ? <ul className="kitchen-item-list">{order.items.map((item) => <li key={`${order.order_id}-${item.item_no}`}><span>{item.food_name}</span><b>× {item.quantity}</b></li>)}</ul> : <p className="kitchen-items-missing">Items unavailable from the order detail response.</p>}
+        </article>)}</div>}
+        {queuedOrders.length > 0 && <div className="kitchen-action-row"><div><strong>Oldest order: #{frontOrder.order_id}</strong><small>Only this front order can be started next.</small></div><button className="primary-button" onClick={startPreparing} disabled={processing || loading}>{processing ? 'Updating order…' : '▶ Start Preparing'}</button></div>}
+      </section>
+
+      <aside className="panel queue-explainer">
+        <span className="section-kicker">DATA STRUCTURES · LINKED LIST</span><h2>Queue mechanics</h2>
+        <p>Each node stores an order and a pointer to the next node. The front is the oldest order; the rear is the newest.</p>
+        <div className="queue-measures"><div><small>SIZE</small><strong>{queueRef.current.size()}</strong></div><div><small>DEQUEUED</small><strong>{processedCount}</strong></div></div>
+        <div className="queue-pointer-row"><span><i /> FRONT</span><strong>{frontOrder ? `#${frontOrder.order_id}` : '—'}</strong></div>
+        <div className="queue-node-strip" aria-label="Queue node order">{queuedOrders.slice(0, 4).map((order, index) => <span className="queue-node-group" key={order.order_id}><b>{order.order_id}</b>{index < Math.min(queuedOrders.length, 4) - 1 && <i aria-hidden="true">→</i>}</span>)}{queuedOrders.length > 4 && <small>+{queuedOrders.length - 4}</small>}{!queuedOrders.length && <small>Empty</small>}</div>
+        <div className="queue-pointer-row queue-rear-row"><span><i /> REAR</span><strong>{rearOrder ? `#${rearOrder.order_id}` : '—'}</strong></div>
+        <div className="queue-operations"><div><b>Enqueue</b><span>Refresh appends placed orders in oldest-first order.</span><small>O(1) per node</small></div><div><b>Dequeue</b><span>Start Preparing updates the front order first, then removes it after API confirmation.</span><small>O(1)</small></div></div>
+        <p className="queue-last-operation" role="status">{lastOperation}</p>
+      </aside>
+    </div>
+  </div>;
+}
+
 function OrderModal({ customers, tables, staff, menu, lookupError, saving, onClose, onSave }) {
-  const [customerId, setCustomerId] = useState(''); const [tableNumber, setTableNumber] = useState(''); const [staffId, setStaffId] = useState(''); const [items, setItems] = useState([{ menu_item_id: '', quantity: '1' }]); const [error, setError] = useState('');
-  function setItem(index, key, value) { setItems((current) => current.map((item, i) => i === index ? { ...item, [key]: value } : item)); }
-  function submit(event) { event.preventDefault(); if (!customerId || !tableNumber) return setError('Choose a customer and table.'); if (!items.length || items.some((item) => !item.menu_item_id || !/^\d+$/.test(item.quantity) || Number(item.quantity) < 1 || Number(item.quantity) > 2147483647)) return setError('Choose a menu item and a positive whole-number quantity for every row.'); onSave({ customer_id: String(customerId), table_number: Number(tableNumber), accepted_by_staff_id: staffId || null, items: items.map((item) => ({ menu_item_id: String(item.menu_item_id), quantity: Number(item.quantity) })) }); }
-  return <Modal title="Create an order" description="Choose the guest, table and menu items. The server records current menu prices." onClose={onClose}><form className="form-stack" onSubmit={submit}>{lookupError && <div className="form-error">Lookup data could not be loaded: {lookupError}</div>}<div className="form-grid"><Field label="Customer" required><select autoFocus value={customerId} onChange={(e) => setCustomerId(e.target.value)}><option value="">Choose a guest</option>{customers.map((customer) => <option key={customer.customer_id} value={customer.customer_id}>{customer.customer_name}</option>)}</select></Field><Field label="Table" required><select value={tableNumber} onChange={(e) => setTableNumber(e.target.value)}><option value="">Choose a table</option>{tables.map((table) => <option key={table.table_number} value={table.table_number}>Table {table.table_number}</option>)}</select></Field></div><Field label="Accepted by staff"><select value={staffId} onChange={(e) => setStaffId(e.target.value)}><option value="">Unassigned</option>{staff.filter((person) => person.is_active).map((person) => <option key={person.staff_id} value={person.staff_id}>{person.staff_name} · {person.role}</option>)}</select></Field><div className="form-label-row"><span className="field-title">Order items <i>*</i></span><button type="button" className="row-action" onClick={() => setItems((current) => [...current, { menu_item_id: '', quantity: '1' }])}>＋ Add item</button></div>{items.map((item, index) => <div className="order-item-row" key={index}><select aria-label={`Menu item ${index + 1}`} value={item.menu_item_id} onChange={(e) => setItem(index, 'menu_item_id', e.target.value)}><option value="">Choose menu item</option>{menu.map((menuItem) => <option key={menuItem.menu_item_id} value={menuItem.menu_item_id}>{menuItem.food_name} · {formatMoney(menuItem.current_price)}</option>)}</select><input aria-label={`Quantity ${index + 1}`} type="number" min="1" step="1" value={item.quantity} onChange={(e) => setItem(index, 'quantity', e.target.value)} /><button type="button" className="remove-item" aria-label="Remove item" disabled={items.length === 1} onClick={() => setItems((current) => current.filter((_, i) => i !== index))}>×</button></div>)}<p className="form-help">Prices and subtotal are calculated by the backend; no frontend price is sent.</p>{error && <div className="form-error">{error}</div>}<div className="modal-actions"><button type="button" className="secondary-button" onClick={onClose} disabled={saving}>Cancel</button><button className="primary-button" disabled={saving || !customers.length || !tables.length || !menu.length}>{saving ? 'Creating…' : 'Create order'}</button></div></form></Modal>;
+  const [customerId, setCustomerId] = useState('');
+  const [tableNumber, setTableNumber] = useState('');
+  const [staffId, setStaffId] = useState('');
+  const [items, setItems] = useState(() => [createOrderDraftItem()]);
+  const [error, setError] = useState('');
+  const [undoDepth, setUndoDepth] = useState(0);
+  const [lastActionUndone, setLastActionUndone] = useState('No changes undone yet.');
+  const undoStack = useRef(new LinkedListStack());
+  const submitLock = useRef(false);
+
+  function saveSnapshot(action) {
+    undoStack.current.push({ items: items.map((item) => ({ ...item })), action });
+    setUndoDepth(undoStack.current.size());
+    setError('');
+  }
+
+  function addItem() {
+    saveSnapshot('Added an item row');
+    setItems([...items, createOrderDraftItem()]);
+  }
+
+  function updateItem(index, key, value) {
+    const current = items[index];
+    if (!current || current[key] === value) return;
+    const menuItem = menu.find((candidate) => String(candidate.menu_item_id) === String(key === 'menu_item_id' ? value : current.menu_item_id));
+    const rowName = menuItem?.food_name || `item ${index + 1}`;
+    const action = key === 'quantity'
+      ? `Changed quantity for ${rowName} to ${value || 'blank'}`
+      : value ? `Added ${menuItem?.food_name || 'a menu item'} to the draft` : `Cleared the menu selection for item ${index + 1}`;
+    saveSnapshot(action);
+    setItems(items.map((item, itemIndex) => itemIndex === index ? { ...item, [key]: value } : item));
+  }
+
+  function removeItem(index) {
+    if (items.length <= 1) return;
+    const item = items[index];
+    const menuItem = menu.find((candidate) => String(candidate.menu_item_id) === String(item?.menu_item_id));
+    saveSnapshot(`Removed ${menuItem?.food_name || `item ${index + 1}`} from the draft`);
+    setItems(items.filter((candidate) => candidate.draft_key !== item.draft_key));
+  }
+
+  function undoLastChange() {
+    const snapshot = undoStack.current.pop();
+    if (!snapshot) return;
+    setItems(snapshot.items.map((item) => ({ ...item })));
+    setUndoDepth(undoStack.current.size());
+    setLastActionUndone(snapshot.action);
+    setError('');
+  }
+
+  const draftSubtotal = items.reduce((total, item) => {
+    const menuItem = menu.find((candidate) => String(candidate.menu_item_id) === String(item.menu_item_id));
+    if (!/^\d+$/.test(item.quantity)) return total;
+    const quantity = Number(item.quantity);
+    if (!menuItem || !Number.isSafeInteger(quantity) || quantity < 1 || quantity > 2147483647) return total;
+    return total + Number(menuItem.current_price || 0) * quantity;
+  }, 0);
+
+  async function submit(event) {
+    event.preventDefault();
+    if (submitLock.current || saving) return;
+    setError('');
+    if (!customerId || !tableNumber) return setError('Choose a customer and table.');
+    if (!items.length || items.some((item) => !item.menu_item_id || !/^\d+$/.test(item.quantity) || Number(item.quantity) < 1 || Number(item.quantity) > 2147483647)) {
+      return setError('Choose a menu item and a positive whole-number quantity for every row.');
+    }
+    submitLock.current = true;
+    try {
+      const saved = await onSave({
+        customer_id: String(customerId),
+        table_number: Number(tableNumber),
+        accepted_by_staff_id: staffId || null,
+        items: items.map((item) => ({ menu_item_id: String(item.menu_item_id), quantity: Number(item.quantity) })),
+      });
+      if (saved) {
+        undoStack.current = new LinkedListStack();
+        setUndoDepth(0);
+      } else {
+        setError('Order was not saved. The draft and its undo history are still available.');
+      }
+    } catch (err) {
+      setError(`Order was not saved. Your draft and undo history are still available. ${err.message}`);
+    } finally {
+      submitLock.current = false;
+    }
+  }
+
+  const nextUndo = undoStack.current.peek();
+
+  return <Modal title="Create an order" description="Choose the guest, table and menu items. The server records current menu prices." onClose={onClose}>
+    <form className="form-stack" onSubmit={submit}>
+      {lookupError && <div className="form-error">Lookup data could not be loaded: {lookupError}</div>}
+      <div className="form-grid">
+        <Field label="Customer" required><select autoFocus disabled={saving} value={customerId} onChange={(event) => setCustomerId(event.target.value)}><option value="">Choose a guest</option>{customers.map((customer) => <option key={customer.customer_id} value={customer.customer_id}>{customer.customer_name}</option>)}</select></Field>
+        <Field label="Table" required><select disabled={saving} value={tableNumber} onChange={(event) => setTableNumber(event.target.value)}><option value="">Choose a table</option>{tables.map((table) => <option key={table.table_number} value={table.table_number}>Table {table.table_number}</option>)}</select></Field>
+      </div>
+      <Field label="Accepted by staff"><select disabled={saving} value={staffId} onChange={(event) => setStaffId(event.target.value)}><option value="">Unassigned</option>{staff.filter((person) => person.is_active).map((person) => <option key={person.staff_id} value={person.staff_id}>{person.staff_name} · {person.role}</option>)}</select></Field>
+
+      <div className="form-label-row"><span className="field-title">Order items <i>*</i></span><button type="button" className="row-action" onClick={addItem} disabled={saving}>＋ Add item</button></div>
+      {items.map((item, index) => <div className="order-item-row" key={item.draft_key}>
+        <select aria-label={`Menu item ${index + 1}`} disabled={saving} value={item.menu_item_id} onChange={(event) => updateItem(index, 'menu_item_id', event.target.value)}><option value="">Choose menu item</option>{menu.map((menuItem) => <option key={menuItem.menu_item_id} value={menuItem.menu_item_id}>{menuItem.food_name} · {formatMoney(menuItem.current_price)}</option>)}</select>
+        <input aria-label={`Quantity ${index + 1}`} disabled={saving} type="number" min="1" max="2147483647" step="1" value={item.quantity} onChange={(event) => updateItem(index, 'quantity', event.target.value)} />
+        <button type="button" className="remove-item" aria-label={`Remove item ${index + 1}`} disabled={items.length === 1 || saving} onClick={() => removeItem(index)}>×</button>
+      </div>)}
+
+      <div className="draft-total"><span>Draft subtotal estimate</span><strong>{formatMoney(draftSubtotal)}</strong><small>Menu-price preview only; the backend calculates the saved total.</small></div>
+      <section className="undo-stack-panel" aria-label="Draft undo stack">
+        <div className="undo-stack-heading"><div><strong>Unsaved draft · Undo Stack</strong><small>LIFO: last change in, first change undone</small></div><span className="undo-stack-size">{undoDepth} {undoDepth === 1 ? 'snapshot' : 'snapshots'}</span></div>
+        <div className="undo-stack-actions"><div><b>push</b><span>Item add, remove or quantity changes</span><small>O(1)</small></div><div><b>pop</b><span>{nextUndo ? `Undo next: ${nextUndo.action}` : 'Nothing to undo'}</span><small>O(1)</small></div></div>
+        <div className="undo-stack-footer"><span>Last undone: {lastActionUndone}</span><button type="button" className="secondary-button" onClick={undoLastChange} disabled={!undoDepth || saving}>↶ Undo</button></div>
+      </section>
+      <p className="form-help">Prices and totals are confirmed by the backend; no frontend price is sent.</p>
+      {error && <div className="form-error" role="alert">{error}</div>}
+      <div className="modal-actions"><button type="button" className="secondary-button" onClick={onClose} disabled={saving}>Cancel</button><button className="primary-button" disabled={saving || !customers.length || !tables.length || !menu.length}>{saving ? 'Creating…' : 'Create order'}</button></div>
+    </form>
+  </Modal>;
 }
 
 function OrderDetailModal({ detail, onClose }) {
